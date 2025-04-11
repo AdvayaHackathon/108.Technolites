@@ -14,9 +14,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
 from captum.attr import GuidedBackprop
-from lime import lime_image
-from skimage.segmentation import mark_boundaries
-from PIL import Image
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 # Constants
 SEVERITY_LABELS = ["Severe", "Mild", "Moderate", "Proliferate_DR", "No_DR"]
@@ -30,7 +29,6 @@ REMEDIES = {
 
 MODEL_PATH = "models/retinal_mamba_cnn.h5"
 XAI_MODEL_PATH = "models/retinal_mamba_torch.pth"
-LIME_MODEL_PATH = "models/lime_retinal_model.pth"
 
 # Image preprocessing
 def preprocess_image(image_path):
@@ -53,18 +51,33 @@ class SimpleTorchModel(nn.Module):
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
+# Matplotlib Bar Chart Canvas
+class SeverityGraphCanvas(FigureCanvas):
+    def __init__(self, parent=None):
+        self.fig = Figure(figsize=(5, 2))
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setParent(parent)
+
+    def plot_confidences(self, confidences, labels):
+        self.ax.clear()
+        self.ax.bar(labels, confidences, color='darkblue')
+        self.ax.set_ylim(0, 1)
+        self.ax.set_ylabel('Confidence')
+        self.ax.set_title('Prediction Confidence by Severity')
+        self.draw()
+
+# Main App Class
 class DiabetesApp(QWidget):
     def __init__(self):
         super().__init__()
 
         self.model = None
         self.xai_model = None
-        self.lime_model = None
         self.load_models()
         self.initUI()
 
     def load_models(self):
-        """Load both TF and Torch models with error handling"""
         print("[INFO] Loading TensorFlow model...")
         try:
             self.model = load_model(MODEL_PATH)
@@ -77,29 +90,19 @@ class DiabetesApp(QWidget):
             self.xai_model = SimpleTorchModel()
             self.xai_model.load_state_dict(torch.load(XAI_MODEL_PATH, map_location=torch.device('cpu')))
             self.xai_model.eval()
-            print("[SUCCESS] PyTorch XAI model loaded.")
+            print("[SUCCESS] PyTorch model loaded.")
         except Exception as e:
-            print(f"[ERROR] Failed to load PyTorch XAI model: {e}")
+            print(f"[ERROR] Failed to load PyTorch model: {e}")
             self.xai_model = None
 
-        print("[INFO] Loading LIME-compatible PyTorch model...")
-        try:
-            self.lime_model = SimpleTorchModel()
-            self.lime_model.load_state_dict(torch.load(LIME_MODEL_PATH, map_location=torch.device('cpu')))
-            self.lime_model.eval()
-            print("[SUCCESS] LIME model loaded.")
-        except Exception as e:
-            print(f"[ERROR] Failed to load LIME model: {e}")
-            self.lime_model = None
-
     def initUI(self):
-        self.setWindowTitle("Diabetes Detection with XAI & LIME")
-        self.setGeometry(100, 100, 600, 500)
-        self.setStyleSheet("background-color: skyblue;")
+        self.setWindowTitle("Diabetes Detection with XAI")
+        self.setGeometry(100, 100, 700, 700)
+        self.setStyleSheet("background-color: #e6f2ff;")
 
         self.label = QLabel("Upload Retinal Image for Analysis", self)
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet("color: black; font-size: 16px; font-weight: bold;")
+        self.label.setStyleSheet("color: #003366; font-size: 18px; font-weight: bold;")
 
         self.image_label = QLabel(self)
         self.image_label.setFixedSize(224, 224)
@@ -119,12 +122,16 @@ class DiabetesApp(QWidget):
         self.remedy_label.setAlignment(Qt.AlignCenter)
         self.remedy_label.setStyleSheet("color: darkgreen; font-size: 14px; font-weight: bold;")
 
+        self.graph_canvas = SeverityGraphCanvas(self)
+
         layout = QVBoxLayout()
         layout.addWidget(self.label)
         layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
         layout.addWidget(self.button, alignment=Qt.AlignCenter)
         layout.addWidget(self.result_label)
         layout.addWidget(self.remedy_label)
+        layout.addWidget(self.graph_canvas)
+
         self.setLayout(layout)
 
     def upload_image(self):
@@ -133,33 +140,31 @@ class DiabetesApp(QWidget):
         if file_name:
             self.image_label.setPixmap(QPixmap(file_name).scaled(224, 224))
 
-            prediction = self.predict_with_model(file_name)
-            self.result_label.setText(f"Diagnosis: {prediction}")
-            self.remedy_label.setText(f"Remedy: {REMEDIES.get(prediction, 'Consult a doctor for more details.')}")
+            predicted_label, confidences = self.predict_with_model(file_name)
+            self.result_label.setText(f"Diagnosis: {predicted_label}")
+            self.remedy_label.setText(f"Remedy: {REMEDIES.get(predicted_label, 'Consult a doctor for more details.')}")
+
+            if confidences is not None:
+                self.graph_canvas.plot_confidences(confidences, SEVERITY_LABELS)
 
             if self.xai_model:
                 self.explain_with_xai(file_name)
 
-            if self.lime_model:
-                self.explain_with_lime(file_name)
-
     def predict_with_model(self, image_path):
         if self.model is None:
-            return "Model not loaded!"
+            return "Model not loaded!", None
 
         img = preprocess_image(image_path)
-        prediction = self.model.predict(img)
+        prediction = self.model.predict(img)[0]
         predicted_label = SEVERITY_LABELS[np.argmax(prediction)]
-        return predicted_label
+        return predicted_label, prediction
 
     def explain_with_xai(self, image_path):
         img = cv2.imread(image_path)
         img = cv2.resize(img, (224, 224))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        transform = transforms.Compose([
-            transforms.ToTensor()
-        ])
+        transform = transforms.Compose([transforms.ToTensor()])
         tensor_image = transform(img).unsqueeze(0)
         tensor_image.requires_grad = True
 
@@ -181,43 +186,6 @@ class DiabetesApp(QWidget):
             self.image_label.setPixmap(QPixmap(xai_output_path).scaled(224, 224))
         except Exception as e:
             print(f"[ERROR] XAI explanation failed: {e}")
-
-    def explain_with_lime(self, image_path):
-        img = Image.open(image_path).resize((224, 224))
-        img_np = np.array(img)
-
-        def batch_predict(images):
-            self.lime_model.eval()
-            batch = torch.stack([transforms.ToTensor()(Image.fromarray(img)) for img in images], dim=0)
-            with torch.no_grad():
-                outputs = self.lime_model(batch)
-                return torch.nn.functional.softmax(outputs, dim=1).numpy()
-
-        explainer = lime_image.LimeImageExplainer()
-        explanation = explainer.explain_instance(
-            image=img_np,
-            classifier_fn=batch_predict,
-            top_labels=1,
-            hide_color=0,
-            num_samples=1000
-        )
-
-        temp, mask = explanation.get_image_and_mask(
-            explanation.top_labels[0],
-            positive_only=True,
-            num_features=10,
-            hide_rest=False
-        )
-
-        lime_vis_path = "lime_output.png"
-        plt.figure(figsize=(3, 3))
-        plt.imshow(mark_boundaries(temp, mask))
-        plt.axis("off")
-        plt.title("LIME: Local Explanation")
-        plt.savefig(lime_vis_path)
-        plt.close()
-
-        self.image_label.setPixmap(QPixmap(lime_vis_path).scaled(224, 224))
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
