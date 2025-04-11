@@ -16,9 +16,11 @@ from PyQt5.QtCore import Qt
 from captum.attr import GuidedBackprop
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.patches import Patch
 
 # Constants
 SEVERITY_LABELS = ["Severe", "Mild", "Moderate", "Proliferate_DR", "No_DR"]
+DAMAGE_CLASSES = {"Severe", "Moderate", "Proliferate_DR"}
 REMEDIES = {
     "Severe": "Immediate medical intervention required. Consult an ophthalmologist.",
     "Mild": "Regular eye checkups and controlled diet advised.",
@@ -54,17 +56,29 @@ class SimpleTorchModel(nn.Module):
 # Matplotlib Bar Chart Canvas
 class SeverityGraphCanvas(FigureCanvas):
     def __init__(self, parent=None):
-        self.fig = Figure(figsize=(5, 2))
+        self.fig = Figure(figsize=(6, 3))
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setParent(parent)
 
     def plot_confidences(self, confidences, labels):
         self.ax.clear()
-        self.ax.bar(labels, confidences, color='darkblue')
+
+        # Set colors: red for damage classes, blue otherwise
+        colors = ["red" if label in DAMAGE_CLASSES else "darkblue" for label in labels]
+        bars = self.ax.bar(labels, confidences, color=colors)
+
         self.ax.set_ylim(0, 1)
         self.ax.set_ylabel('Confidence')
         self.ax.set_title('Prediction Confidence by Severity')
+
+        # Add legend
+        legend_elements = [
+            Patch(facecolor='red', label='Diabetic Damage Detected'),
+            Patch(facecolor='darkblue', label='No Damage')
+        ]
+        self.ax.legend(handles=legend_elements, loc='upper right')
+
         self.draw()
 
 # Main App Class
@@ -192,4 +206,3 @@ if __name__ == "__main__":
     window = DiabetesApp()
     window.show()
     sys.exit(app.exec_())
-
